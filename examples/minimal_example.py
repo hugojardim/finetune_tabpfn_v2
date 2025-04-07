@@ -1,14 +1,19 @@
 from __future__ import annotations
 
-from finetuning_scripts.finetune_tabpfn_main import fine_tune_tabpfn
+import sys
+from pyprojroot import here
+
+sys.path.append(str(here() / "finetune_tabpfn_v2"))
+
 from sklearn.datasets import load_iris
 from sklearn.metrics import log_loss
 from sklearn.model_selection import train_test_split
 from tabpfn import TabPFNClassifier
 
+from finetuning_scripts.finetune_tabpfn_main import fine_tune_tabpfn
+
 import multiprocessing
 
-# E modifique o final do arquivo:
 if __name__ == "__main__":
     # Necessário para o multiprocessamento no Windows
     multiprocessing.freeze_support()
@@ -18,7 +23,7 @@ if __name__ == "__main__":
     X_train, X_test, y_train, y_test = train_test_split(
         X, y, test_size=0.33, random_state=42,
     )
-    
+
     save_path_to_fine_tuned_model = "./fine_tuned_model.ckpt"
     fine_tune_tabpfn(
         path_to_base_model="auto",

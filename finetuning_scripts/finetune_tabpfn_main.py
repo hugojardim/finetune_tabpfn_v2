@@ -21,7 +21,7 @@ from finetuning_scripts.constant_utils import (
     TaskType,
 )
 from finetuning_scripts.data_classes import FineTuneSetup, FineTuneStepResults
-from finetuning_scripts.metric_utils.ag_metrics import get_metric
+from finetuning_scripts.metric_utils.ag_metrics import *
 from finetuning_scripts.training_utils.ag_early_stopping import AdaptiveES
 from finetuning_scripts.training_utils.data_utils import get_data_loader
 from finetuning_scripts.training_utils.training_loss import compute_loss, get_loss
@@ -32,6 +32,34 @@ from torch import autocast
 from torch.cuda.amp import GradScaler
 from torch.nn import DataParallel
 from tqdm import tqdm
+
+from sklearn.metrics import (
+    mean_squared_error,
+    root_mean_squared_error,
+    mean_absolute_error,
+    median_absolute_error,
+    r2_score,
+)
+from scipy.stats import spearmanr, pearsonr
+
+# Definir o dicionário de métricas de regressão
+REGRESSION_METRICS = {
+    "r2": r2_score,
+    "mean_squared_error": mean_squared_error,
+    "root_mean_squared_error": root_mean_squared_error,
+    "mean_absolute_error": mean_absolute_error,
+    "median_absolute_error": median_absolute_error,
+    "mean_absolute_percentage_error": lambda y_true, y_pred: np.mean(
+        np.abs((y_true - y_pred) / y_true)
+    )
+    * 100,
+    "symmetric_mean_absolute_percentage_error": lambda y_true, y_pred: np.mean(
+        np.abs(y_pred - y_true) / ((np.abs(y_true) + np.abs(y_pred)) / 2)
+    )
+    * 100,
+    "spearmanr": lambda y_true, y_pred: spearmanr(y_true, y_pred)[0],
+    "pearsonr": lambda y_true, y_pred: pearsonr(y_true, y_pred)[0],
+}
 
 if TYPE_CHECKING:
     from tabpfn.model.transformer import PerFeatureTransformer
@@ -63,7 +91,7 @@ def fine_tune_tabpfn(
     task_type: TaskType,
     device: SupportedDevice,
     use_multiple_gpus: bool = False,
-    multiple_device_ids: Sequence[Union[int, torch.device]] | None  = None,
+    multiple_device_ids: Sequence[Union[int, torch.device]] | None = None,
     X_val: pd.DataFrame | None = None,
     y_val: pd.Series | None = None,
     random_seed: int = 42,
@@ -118,6 +146,18 @@ def fine_tune_tabpfn(
     """
     st_time = time.time()
 
+    metrics = [
+        "r2",
+        # 'mean_squared_error',
+        "root_mean_squared_error",
+        "mean_absolute_error",
+        "median_absolute_error",
+        "mean_absolute_percentage_error",
+        # 'symmetric_mean_absolute_percentage_error',
+        "spearmanr",
+        # 'pearsonr',
+    ]
+
     # Control logging
     logger.setLevel(logger_level)
     disable_progress_bar = logger_level >= 20
@@ -157,7 +197,7 @@ def fine_tune_tabpfn(
     model.criterion = criterion
     checkpoint_config = checkpoint_config.__dict__
     is_data_parallel = False
-    if device == 'cuda' and use_multiple_gpus and torch.cuda.device_count() > 1:
+    if device == "cuda" and use_multiple_gpus and torch.cuda.device_count() > 1:
         model = DataParallel(model, device_ids=multiple_device_ids)
         is_data_parallel = True
     model.to(device)
@@ -267,8 +307,11 @@ def fine_tune_tabpfn(
     )
     torch.save(
         dict(
-            state_dict=model.module.state_dict() if is_data_parallel else model.state_dict(),
-            config=checkpoint_config),
+            state_dict=model.module.state_dict()
+            if is_data_parallel
+            else model.state_dict(),
+            config=checkpoint_config,
+        ),
         str(save_path_to_fine_tuned_model),
     )
     logger.debug(f"Initial validation loss: {best_validation_loss}")
@@ -323,6 +366,60 @@ def fine_tune_tabpfn(
             step_with_update=update_now,
         )
 
+        # # Calcular métricas para os dados do batch atual
+        # if step_i % 1 == 0:  # Calcular métricas a cada 10 steps para economizar tempo
+        #     print(f"\n=== Step {step_i} Metrics ===")
+
+        #     # Converter tensores para numpy para cálculo de métricas
+        #     # Converter tensores para numpy para cálculo de métricas
+        #     with torch.no_grad():
+        #         # Gerar predições de treino
+        #         model.eval()
+        #         # Garantir que X_train e X_test têm as mesmas dimensões, exceto na primeira
+        #         train_preds = model_forward_fn(
+        #             model=model,
+        #             X_train=batch_data["X_train"][
+        #                 :1
+        #             ],  # Manter apenas 1 amostra de treinamento
+        #             y_train=batch_data["y_train"][
+        #                 :1
+        #             ],  # Manter apenas 1 amostra de treinamento
+        #             X_test=batch_data["X_test"],  # Todas as amostras de teste do batch
+        #             forward_for_validation=True,
+        #         )
+
+        #         # Gerar predições de validação apenas se for o momento apropriado
+        #         if validate_now:
+        #             val_tensor_X = torch.tensor(X_val.values).float().to(device)
+        #             val_tensor_X = val_tensor_X.reshape(
+        #                 val_tensor_X.shape[0], 1, val_tensor_X.shape[1]
+        #             )
+
+        #             val_tensor_y = torch.tensor(y_val.values).float().to(device)
+        #             val_tensor_y = val_tensor_y.reshape(val_tensor_y.shape[0], 1, 1)
+
+        #             val_preds = model_forward_fn(
+        #                 model=model,
+        #                 X_train=batch_data["X_train"][:1],
+        #                 y_train=batch_data["y_train"][:1],
+        #                 X_test=val_tensor_X,
+        #                 forward_for_validation=True,
+        #             )
+
+        #     # Métricas de treino
+        #     print("Training Metrics:")
+        #     train_metrics = get_metrics(
+        #         y_true=batch_data["y_train"][:1].cpu().numpy(),
+        #         y_pred=train_preds.cpu().numpy(),
+        #     )
+
+        #     # Métricas de validação (se aplicável neste step)
+        #     if validate_now:
+        #         print("\nValidation Metrics:")
+        #         val_metrics = get_metrics(
+        #             y_true=val_tensor_y.cpu().numpy(), y_pred=val_preds.cpu().numpy()
+        #         )
+
         if step_results.optimizer_step_skipped:
             logger.info("\nOptimizer step skipped due to NaNs/infs in grad scaling.")
             validate_now = False
@@ -345,8 +442,11 @@ def fine_tune_tabpfn(
                 best_validation_loss = validation_loss
                 torch.save(
                     dict(
-                        state_dict=model.module.state_dict() if is_data_parallel else model.state_dict(),
-                        config=checkpoint_config),
+                        state_dict=model.module.state_dict()
+                        if is_data_parallel
+                        else model.state_dict(),
+                        config=checkpoint_config,
+                    ),
                     str(save_path_to_fine_tuned_model),
                 )
         else:
@@ -402,6 +502,36 @@ def fine_tune_tabpfn(
         show_training_curve=show_training_curve,
         st_time=st_time,
     )
+
+
+# def get_metrics(
+#     y_true: np.ndarray | torch.Tensor,
+#     y_pred: np.ndarray | torch.Tensor,
+# ):
+#     y_true = np.asarray(y_true).flatten()
+#     y_pred = np.asarray(y_pred).flatten()
+
+#     metrics = {
+#         "mse": mean_squared_error(y_true, y_pred),
+#         "rmse": root_mean_squared_error(y_true, y_pred),
+#         "mae": mean_absolute_error(y_true, y_pred),
+#         "mape": np.mean(np.abs((y_true - y_pred) / y_true)) * 100,
+#         "spearman": spearmanr(y_true, y_pred)[0],
+#         "pearson": pearsonr(y_true, y_pred)[0],
+#         "r2": r2_score(y_true, y_pred),
+#     }
+
+#     # Calcula as métricas
+#     metrics_dict = {}
+#     for metric_name in metrics.keys():
+#         metric_func = REGRESSION_METRICS.get(metric_name)
+#         if metric_func is not None:
+#             metrics_dict[metric_name] = metric_func(y_true, y_pred)
+
+#     print("Metrics:")
+#     print(metrics_dict)
+
+#     return metrics_dict
 
 
 def _model_forward(
@@ -489,7 +619,9 @@ def _model_forward(
         if forward_for_validation:
             new_pred_logits = []
             for batch_i in range(pred_logits.shape[1]):
-                bar_dist = deepcopy(model.module.criterion if is_data_parallel else model.criterion)
+                bar_dist = deepcopy(
+                    model.module.criterion if is_data_parallel else model.criterion
+                )
                 bar_dist.borders = (
                     bar_dist.borders * std[batch_i] + mean[batch_i]
                 ).float()
@@ -641,8 +773,13 @@ def _setup_tuning(
         data_loader_workers=data_loader_workers,
         loss_fn=get_loss(
             task_type=task_type,
-            borders=None if is_classification else
-                    (model.module.criterion.borders if is_data_parallel else model.criterion.borders),
+            borders=None
+            if is_classification
+            else (
+                model.module.criterion.borders
+                if is_data_parallel
+                else model.criterion.borders
+            ),
         ),
     )
 
